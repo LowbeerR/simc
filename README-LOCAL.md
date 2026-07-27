@@ -69,6 +69,60 @@ Options: `gear-options.ps1 -CraftedIlvl 0` skips the crafted scan,
 precision, `-FightStyle DungeonSlice` for an M+-ish fight, `-DryRun` to only
 generate the profileset file without simulating.
 
+## Voidcore dungeon planner (voidcore-dungeons.ps1)
+
+Answers "which Mythic+ dungeon should I spam my Nebulous Voidcores in?"
+
+A Voidcore spent after an M+ run is a bonus roll: it **always** awards one
+item, drawn uniformly from that dungeon's loot table filtered by your loot
+spec, at the **Great Vault** item level for the key you finished — *not* the
+lower end-of-dungeon ilvl. So one Voidcore in dungeon D is worth
+
+```
+E[D] = (1 / N) x SUM over its N eligible items of max(0, dps gain)
+```
+
+which means a **small** table with a few big upgrades beats a large table
+holding the same upgrades. That dilution is the whole point of computing this
+instead of guessing: in testing, Seat of the Triumvirate held the single
+biggest upgrade available (+20.8%) yet ranked 4th, because its 16-item pool
+made any particular item unlikely.
+
+Copy the `/simc` export to the clipboard and double-click **`voidcore.bat`** —
+same pattern as `sim-gear.bat`. You can also drag a `.simc` file onto it.
+
+```
+voidcore.bat                                (clipboard export, +10 key)
+voidcore.bat -KeyLevel 6                    (rolls award ilvl 266 instead of 272)
+voidcore.bat my_characters\me.simc          (or drag the file onto voidcore.bat)
+voidcore.bat -Owned 251080,251085           (duplicate protection: already won these)
+voidcore.bat -Refresh                       (re-download the loot tables)
+```
+
+The `.bat` just forwards to `voidcore-dungeons.ps1`, so every switch above works
+if you call the script directly too. Runs on both `pwsh` 7 and Windows
+PowerShell 5.1 (the launcher prefers `pwsh` when present).
+
+It sims every eligible drop at the vault ilvl, ranks all eight season dungeons
+by expected DPS per Voidcore, and writes an interactive
+`*_voidcore_*_report.html` with a per-item breakdown and a "spam it N times"
+curve.
+
+Key-level → roll ilvl (Midnight S1): M0 256, +2-3 259, +4-5 263, +6 266,
++7-9 269, +10 and up 272 (Myth 1/6).
+
+Loot tables come from the live client DB2s via wago.tools, cached under
+`my_characters\lootdata\`. Two things it gets right that are easy to get
+wrong: it **pins the live build** (the newest build on wago is usually a PTR
+one carrying *next* season's dungeon pool), and it **derives** the eight-dungeon
+pool from `MapChallengeMode` rather than hardcoding it. For revived dungeons
+only the currently-enabled loot set is counted — Skyreach's journal entry still
+lists 424 rows of Warlords loot that no longer drops, against 29 that do.
+
+If everything comes back at ~0%, that is the real answer: your gear is already
+above the ilvl the roll awards. Try a lower `-KeyLevel` to confirm, or spend
+the cores on an alt.
+
 ## Useful extras
 
 Add options at the end of the command line, e.g.:
