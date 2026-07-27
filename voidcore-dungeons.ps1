@@ -34,6 +34,7 @@ param(
     [string]$FightStyle,
     [int[]]$Owned = @(),          # item ids already won via Voidcore (removed from the table)
     [int]$Rolls = 8,              # how far to project the "spam it" curve
+    [switch]$Fast,                # no sims: rank by chance of an ITEM LEVEL upgrade (instant)
     [switch]$Refresh,             # ignore the cached loot tables and re-download
     [switch]$NoBrowser,
     [switch]$DryRun
@@ -189,10 +190,15 @@ Write-Host "Season keystone pool ($($loot.Dungeons.Count) dungeons): $((@($loot.
 if ($InputFile) { $text = Get-Content $InputFile -Raw; Write-Host "Input: $InputFile" }
 else            { $text = Get-Clipboard -Raw;         Write-Host 'Input: clipboard' }
 
-$classNames = 'death_knight','demon_hunter','druid','evoker','hunter','mage','monk','paladin','priest','rogue','shaman','warlock','warrior'
+# simc writes the two-word classes WITHOUT an underscore ("demonhunter=Name",
+# "deathknight=Name") in both the addon export and its own profiles, so accept
+# those spellings and normalise to the underscored keys the tables below use.
+$classNames = 'death_knight','demon_hunter','deathknight','demonhunter','druid','evoker','hunter','mage','monk','paladin','priest','rogue','shaman','warlock','warrior'
+$classAlias = @{ deathknight = 'death_knight'; demonhunter = 'demon_hunter' }
 $classRe = "^($($classNames -join '|'))=`"?([^`"]+)`"?\s*$"
 $charClass = $null; $charName = $null
 foreach ($l in ($text -split "`r?`n")) { if ($l -match $classRe) { $charClass = $Matches[1]; $charName = $Matches[2]; break } }
+if ($charClass -and $classAlias[$charClass]) { $charClass = $classAlias[$charClass] }
 if (-not $charClass) { throw "Input does not look like a SimC addon export (no 'class=`"Name`"' line). Copy the /simc text in-game first." }
 $charSpec = if ($text -match '(?m)^spec=(\w+)\s*$') { $Matches[1] } else { '?' }
 Write-Host "Character: $charName ($charClass, $charSpec)"
@@ -372,6 +378,50 @@ foreach ($d in $dungeons) {
         $d.Name, $d.Eligible.Count, $d.Total, $d.RawRows)
 }
 
+# ---------------------------------------------- current ilvl per slot ------
+# The addon export carries the ilvl in the "# Name (272)" comment above each
+# item; simc's own profiles carry it as ilevel= instead.
+$slotIlvl = @{}
+foreach ($s in $equipped.Keys) {
+    $iv = [int]$equipped[$s].Ilvl
+    if (-not $iv -and $equipped[$s].Spec -match 'ilevel=(\d+)') { $iv = [int]$Matches[1] }
+    $slotIlvl[$s] = $iv
+}
+# Where a drop would actually land: for a paired family (rings, trinkets,
+# weapons) you replace your WEAKEST piece, so that is the slot to price against.
+function Get-BestPlacement($e) {
+    $bestSlot = $null; $bestIlvl = [int]::MaxValue
+    foreach ($s in $e.Slots) {
+        $iv = if ($slotIlvl.ContainsKey($s)) { $slotIlvl[$s] } else { 0 }
+        if ($iv -lt $bestIlvl) { $bestIlvl = $iv; $bestSlot = $s }
+    }
+    if (-not $bestSlot) { return $null }
+    [pscustomobject]@{ Slot = $bestSlot; Ilvl = $bestIlvl }
+}
+
+$stamp = Get-Date -Format 'yyyyMMdd_HHmm'
+$base  = Join-Path $outDir ("{0}_voidcore_{1}" -f ($charName -replace '[^\w-]', ''), $stamp)
+$genFile = "$base.simc"; $txtFile = "$base.txt"; $reportFile = "$base`_report.html"
+
+if ($Fast) {
+    # ------------------------------------------------------- instant mode ----
+    # No sims: score purely on item level. "Is this drop an upgrade?" becomes
+    # "is ilvl $dropIlvl higher than what I already have in that slot?", which
+    # needs nothing but the export, so it returns immediately. Blind to stats
+    # and trinket procs - use the full sim run when the answer is close.
+    $gain = @{}
+    foreach ($d in $dungeons) {
+        foreach ($e in $d.Eligible) {
+            if ($gain.ContainsKey($e.Id)) { continue }
+            $p = Get-BestPlacement $e
+            if (-not $p) { continue }              # no usable placement -> scored 0 below
+            $gain[$e.Id] = [pscustomobject]@{ Pct = [double]($dropIlvl - $p.Ilvl); Slot = $p.Slot }
+        }
+    }
+    $metricLabel = 'ilvl'; $metricUnit = ''; $baseDps = 0
+    Write-Host "Instant mode: ranking $($gain.Count) drops by item level (no sims)." -ForegroundColor Cyan
+} else {
+
 # ============================================================================
 #  4) Sim every distinct eligible drop at the vault ilvl for this key level.
 #     One profileset per (item, candidate slot); the item's value is the best
@@ -407,10 +457,6 @@ foreach ($d in $dungeons) {
 $anySlot = @($equipped.Keys)[0]
 $gen.Add("profileset.`"CURRENT GEAR (baseline)`"+=$anySlot=$($equipped[$anySlot].Spec)")
 Write-Host "Candidate drops to sim: $($psKey.Count) (at ilvl $dropIlvl, $dropTrack, key $klLabel)" -ForegroundColor Cyan
-
-$stamp = Get-Date -Format 'yyyyMMdd_HHmm'
-$base  = Join-Path $outDir ("{0}_voidcore_{1}" -f ($charName -replace '[^\w-]', ''), $stamp)
-$genFile = "$base.simc"; $txtFile = "$base.txt"; $reportFile = "$base`_report.html"
 Set-Content -Path $genFile -Encoding UTF8 -Value ($text.TrimEnd() + "`n`n# ---- generated by voidcore-dungeons.ps1 ----`n" + ($gen -join "`n") + "`n")
 if ($DryRun) { Write-Host "Dry run - wrote $genFile"; return }
 
@@ -448,6 +494,9 @@ foreach ($k in $rows.Keys) {
         $gain[$m.Id] = [pscustomobject]@{ Pct = $pct; Slot = $m.Slot }
     }
 }
+$metricLabel = 'DPS'; $metricUnit = '%'
+
+}   # end of the simmed (non -Fast) path
 
 # ============================================================================
 #  5) Score. E[one voidcore] is the plain mean of max(0, gain) over the table,
@@ -498,29 +547,48 @@ foreach ($d in $dungeons) {
     $d | Add-Member Curve $curve -Force
 }
 
-$ranked = @($dungeons | Sort-Object EV -Descending)
+# In instant mode the headline question is "how likely is a roll to land in a
+# slot where I have lower?", so rank by that; EV breaks ties. The simmed mode
+# ranks by expected value, where a 0.1% upgrade and a 12% one are not equal.
+$ranked = if ($Fast) { @($dungeons | Sort-Object @{e={$_.PUp}; d=$true}, @{e={$_.EV}; d=$true}) }
+          else       { @($dungeons | Sort-Object EV -Descending) }
 
 # ------------------------------------------------------------- console ----
 Write-Host ''
 Write-Host "  BEST DUNGEON TO SPAM WITH NEBULOUS VOIDCORES" -ForegroundColor Green
 Write-Host "  $charName - $charClass $charSpec - key $klLabel -> ilvl $dropIlvl ($dropTrack)" -ForegroundColor DarkGray
+if ($Fast) { Write-Host "  INSTANT MODE - ranked by chance of an item-level upgrade (no sims)" -ForegroundColor DarkYellow }
 Write-Host ''
-Write-Host ("  {0,-26} {1,9} {2,8} {3,9} {4,7}" -f 'Dungeon', 'E[+%DPS]', 'P(upgr)', 'best drop', 'pool')
+$evHdr = if ($Fast) { 'E[+ilvl]' } else { 'E[+%DPS]' }
+Write-Host ("  {0,-26} {1,9} {2,8} {3,9} {4,7}" -f 'Dungeon', 'P(upgrade)', $evHdr, 'best drop', 'pool')
 Write-Host ('  ' + ('-' * 74))
 foreach ($d in $ranked) {
     $bestItem = $d.Items | Sort-Object Pct -Descending | Select-Object -First 1
     $bn = if ($bestItem -and $bestItem.Pct -gt 0) { $bestItem.Name } else { '-' }
-    $bp = if ($bestItem -and $bestItem.Pct -gt 0) { '{0,8:n2}%' -f $bestItem.Pct } else { '       -' }
-    Write-Host ("  {0,-26} {1,8:n3}% {2,7:p0} {3} {4,3}/{5,-3}" -f `
-        $d.Name, $d.EV, $d.PUp, $bp, $d.N, $d.Total) `
+    $bp = if (-not $bestItem -or $bestItem.Pct -le 0) { '       -' }
+          elseif ($Fast) { '{0,7:n0} ilvl' -f $bestItem.Pct }
+          else           { '{0,8:n2}%' -f $bestItem.Pct }
+    $ev = if ($Fast) { '{0,8:n1}' -f $d.EV } else { '{0,8:n3}%' -f $d.EV }
+    Write-Host ("  {0,-26} {1,9:p0} {2} {3} {4,3}/{5,-3}" -f `
+        $d.Name, $d.PUp, $ev, $bp, $d.N, $d.Total) `
         -ForegroundColor $(if ($d -eq $ranked[0]) { 'Green' } else { 'Gray' })
     Write-Host ("      best drop: $bn") -ForegroundColor DarkGray
 }
 Write-Host ''
 $top = $ranked[0]
-Write-Host "  -> Spam $($top.Name): $('{0:n3}' -f $top.EV)% expected DPS per Voidcore." -ForegroundColor Green
-if ($top.Curve.Count -ge 1) {
-    Write-Host ("     Spamming it: " + (( 1..$top.Curve.Count | ForEach-Object { "$_ roll$(if($_ -gt 1){'s'}) +$('{0:n2}' -f $top.Curve[$_-1])%" }) -join ' | ')) -ForegroundColor DarkGray
+if ($Fast) {
+    Write-Host ("  -> Spam $($top.Name): {0:p0} chance each Voidcore lands in a slot where you have lower (avg +{1:n1} ilvl)." -f $top.PUp, $top.EV) -ForegroundColor Green
+    # flag when "most likely" and "most valuable" disagree - a table full of
+    # +2 ilvl trinkets can out-rank one holding a single +40 weapon
+    $byEv = @($dungeons | Sort-Object EV -Descending)[0]
+    if ($byEv.Name -ne $top.Name) {
+        Write-Host ("     Note: $($byEv.Name) is likelier to matter - lower odds ({0:p0}) but a bigger average jump (+{1:n1} ilvl)." -f $byEv.PUp, $byEv.EV) -ForegroundColor DarkYellow
+    }
+} else {
+    Write-Host "  -> Spam $($top.Name): $('{0:n3}' -f $top.EV)% expected DPS per Voidcore." -ForegroundColor Green
+    if ($top.Curve.Count -ge 1) {
+        Write-Host ("     Spamming it: " + (( 1..$top.Curve.Count | ForEach-Object { "$_ roll$(if($_ -gt 1){'s'}) +$('{0:n2}' -f $top.Curve[$_-1])%" }) -join ' | ')) -ForegroundColor DarkGray
+    }
 }
 Write-Host ''
 
@@ -594,7 +662,7 @@ tr.top td{background:#1b2b23}
 <div class="panel">
   <h2>Every dungeon, ranked by expected DPS per Voidcore</h2>
   <table id="tbl"><thead><tr>
-    <th></th><th>Dungeon</th><th class="num">E[+% DPS]</th><th style="width:150px"></th>
+    <th></th><th>Dungeon</th><th class="num" id="thEv"></th><th style="width:150px"></th>
     <th class="num">P(upgrade)</th><th class="num">Pool</th><th>Best drop in table</th>
   </tr></thead><tbody></tbody></table>
   <div class="note" style="margin-top:12px">Click a dungeon to see every item its table can hand you.</div>
@@ -616,7 +684,12 @@ tr.top td{background:#1b2b23}
 </div>
 <script>
 const DATA = __ROWS__, META = __META__;
-const f2 = x => (x>=0?'+':'') + x.toFixed(2) + '%';
+const FAST = META.Metric === 'ilvl';
+// instant mode measures item levels, simmed mode measures percent DPS
+const f2 = x => FAST ? ((x>=0?'+':'') + Math.round(x) + ' ilvl')
+                     : ((x>=0?'+':'') + x.toFixed(2) + '%');
+const evTxt = x => FAST ? ('+' + x.toFixed(1) + ' ilvl') : (x.toFixed(3) + '%');
+document.getElementById('thEv').textContent = FAST ? 'E[+ilvl]' : 'E[+% DPS]';
 const tb = document.querySelector('#tbl tbody');
 const maxEv = Math.max(...DATA.map(d=>d.EV), 0.0001);
 
@@ -627,7 +700,7 @@ DATA.forEach((d,ix)=>{
   const bestTxt = best && best.Pct>0 ? `${best.Name} <span class="pill slot">${best.Slot}</span> ${f2(best.Pct)}` : '<span class="zero">nothing is an upgrade</span>';
   tr.innerHTML = `<td><span class="caret">&#9656;</span></td>
     <td>${d.Name} ${d.Legacy?'<span class="pill legacy">revived</span>':''}</td>
-    <td class="num"><b>${d.EV.toFixed(3)}%</b></td>
+    <td class="num"><b>${evTxt(d.EV)}</b></td>
     <td><div class="bar"><i style="width:${(d.EV/maxEv*100).toFixed(1)}%"></i></div></td>
     <td class="num">${Math.round(d.PUp*100)}%</td>
     <td class="num">${d.N}<span class="zero">/${d.Total}</span></td>
@@ -637,7 +710,7 @@ DATA.forEach((d,ix)=>{
   const items = d.Items.slice().sort((a,b)=>b.Pct-a.Pct);
   const mx = Math.max(...items.map(i=>Math.abs(i.Pct)), 0.0001);
   det.innerHTML = `<td colspan="7"><table><thead><tr><th>Item</th><th>Boss</th><th>Slot</th>
-    <th class="num">&Delta; DPS</th><th style="width:130px"></th><th class="num">roll chance</th></tr></thead><tbody>` +
+    <th class="num">${FAST?'&Delta; ilvl':'&Delta; DPS'}</th><th style="width:130px"></th><th class="num">roll chance</th></tr></thead><tbody>` +
     items.map(i=>`<tr><td>${i.Name}</td><td class="zero">${i.Boss}</td>
       <td>${i.Slot==='-'?'<span class="zero">unusable</span>':'<span class="pill slot">'+i.Slot+'</span>'}</td>
       <td class="num" style="color:${i.Pct>0.001?'var(--gain)':(i.Pct<-0.001?'var(--loss)':'var(--dim)')}">${i.Pct>0.001||i.Pct<-0.001?f2(i.Pct):'0'}</td>
@@ -647,11 +720,15 @@ DATA.forEach((d,ix)=>{
   tb.appendChild(tr); tb.appendChild(det);
 });
 
-document.getElementById('hEv').textContent = DATA[0].EV.toFixed(3) + '%';
-document.getElementById('hName').textContent = 'per Voidcore in ' + DATA[0].Name;
-document.getElementById('hWhy').innerHTML =
-  `${DATA[0].N} items can drop for you there, ${Math.round(DATA[0].PUp*100)}% of them an upgrade. ` +
-  (DATA[1] ? `That is ${(DATA[0].EV/Math.max(DATA[1].EV,1e-6)).toFixed(2)}x the next best (${DATA[1].Name}, ${DATA[1].EV.toFixed(3)}%).` : '');
+// instant mode leads with the odds, simmed mode with the expected value
+document.getElementById('hEv').textContent = FAST ? Math.round(DATA[0].PUp*100) + '%' : evTxt(DATA[0].EV);
+document.getElementById('hName').textContent = FAST
+  ? 'of rolls land in a slot where you have lower - ' + DATA[0].Name
+  : 'per Voidcore in ' + DATA[0].Name;
+document.getElementById('hWhy').innerHTML = FAST
+  ? `${DATA[0].N} items can drop for you there; the ones that beat what you wear average ${evTxt(DATA[0].EV)} across the whole table.`
+  : `${DATA[0].N} items can drop for you there, ${Math.round(DATA[0].PUp*100)}% of them an upgrade. ` +
+    (DATA[1] ? `That is ${(DATA[0].EV/Math.max(DATA[1].EV,1e-6)).toFixed(2)}x the next best (${DATA[1].Name}, ${evTxt(DATA[1].EV)}).` : '');
 
 // ---- spam curve -----------------------------------------------------------
 const COLORS = ['#39d98a','#7aa2ff','#ffd24a','#ff7062','#b07cff'];
@@ -665,13 +742,13 @@ const Y = v => H - PB - (v/maxY)*(H-PT-PB);
 let s = '';
 for (let g=0; g<=4; g++){ const v = maxY*g/4, y = Y(v);
   s += `<line x1="${PL}" y1="${y}" x2="${W-PR}" y2="${y}" stroke="#262b36"/>`;
-  s += `<text x="${PL-8}" y="${y+4}" fill="#9aa0ad" font-size="11" text-anchor="end">${v.toFixed(1)}%</text>`; }
+  s += `<text x="${PL-8}" y="${y+4}" fill="#9aa0ad" font-size="11" text-anchor="end">${FAST?Math.round(v):v.toFixed(1)+'%'}</text>`; }
 for (let i=0;i<maxN;i++){ s += `<text x="${X(i)}" y="${H-10}" fill="#9aa0ad" font-size="11" text-anchor="middle">${i+1}</text>`; }
 s += `<text x="${(W+PL)/2}" y="${H-0}" fill="#6f7787" font-size="11" text-anchor="middle"></text>`;
 top.forEach((d,i)=>{
   const pts = d.Curve.map((v,j)=>`${X(j)},${Y(v)}`).join(' ');
   s += `<polyline points="${pts}" fill="none" stroke="${COLORS[i%5]}" stroke-width="2.5" stroke-linejoin="round"/>`;
-  d.Curve.forEach((v,j)=>{ s += `<circle cx="${X(j)}" cy="${Y(v)}" r="3" fill="${COLORS[i%5]}"><title>${d.Name}: ${(j+1)} voidcores -> +${v.toFixed(2)}%</title></circle>`; });
+  d.Curve.forEach((v,j)=>{ s += `<circle cx="${X(j)}" cy="${Y(v)}" r="3" fill="${COLORS[i%5]}"><title>${d.Name}: ${(j+1)} voidcores -> ${f2(v)}</title></circle>`; });
 });
 svg.innerHTML = s;
 document.getElementById('legend').innerHTML =
@@ -689,7 +766,28 @@ document.getElementById('method').innerHTML = META.Method;
     Set-Content -Path $Path -Value $html -Encoding UTF8
 }
 
-$method = @"
+$method = if ($Fast) { @"
+<b>Instant mode</b> (-Fast): no simulations. A drop counts as an upgrade purely on
+item level &mdash; is <b>ilvl $dropIlvl ($dropTrack)</b>, what a Voidcore roll awards at key $klLabel,
+higher than what you currently wear in that slot? For paired slots (rings, trinkets,
+weapons) it prices against your <b>weakest</b> piece, since that is the one a drop replaces.
+<br><br>
+A Voidcore roll always awards one item, drawn uniformly from your loot-spec-filtered
+table, so <b>P(upgrade)</b> is literally the share of that dungeon's table that beats your
+current gear, and <b>E[+ilvl]</b> averages the item-level jump across the whole table
+(non-upgrades counted as zero, because they still consume the roll).
+<br><br>
+<b>This is blind to stats and trinket procs.</b> A same-ilvl trinket with a far better effect
+scores 0 here, and a higher-ilvl piece with the wrong secondaries can be a DPS loss.
+When two dungeons are close, or when weapons and trinkets are involved, drop the
+-Fast switch and let it sim &mdash; that run measures actual DPS.
+<br><br>
+Loot tables come from the live client DB2s (build $($loot.Build)) via wago.tools; the season
+pool is derived from MapChallengeMode rather than hardcoded, and for revived dungeons
+only the currently-enabled loot set is counted. Items you can loot but not equip right
+now (off-hands while you wield a two-hander) stay in the pool at zero value, because
+they still dilute every roll.
+"@ } else { @"
 A Nebulous Voidcore spent after a Mythic+ run is a bonus roll that <b>always</b> awards one item,
 drawn uniformly from that dungeon's loot table filtered by your loot specialisation, at the
 <b>Great Vault</b> item level for the key you completed &mdash; <b>ilvl $dropIlvl ($dropTrack)</b> at key $klLabel,
@@ -708,7 +806,7 @@ stay in the pool at zero value, because they still dilute every roll. Duplicate 
 by removing items you pass via <code>-Owned</code>. Trinket and weapon values are sim-measured, so
 proc-driven items are handled properly, but the multi-roll curve ignores secondary-stat overlap
 between slots and therefore reads slightly high.
-"@
+"@ }
 
 $reportRows = @($ranked | ForEach-Object {
     [pscustomobject]@{
@@ -717,10 +815,13 @@ $reportRows = @($ranked | ForEach-Object {
         Items = @($_.Items | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Boss = $_.Boss; Slot = $_.Slot; Pct = [math]::Round($_.Pct, 3) } })
     }
 })
+$howMeasured = if ($Fast) { "<b>instant mode</b> (item level only, no sims)" }
+               else { "$($psKey.Count) drops simmed at target_error $TargetError" }
 $meta = [pscustomobject]@{
     Title    = "Voidcore plan - $charName"
-    Subtitle = "<b>$charName</b> &middot; $charClass $charSpec &middot; key <b>$klLabel</b> &rarr; drops at <b>ilvl $dropIlvl</b> ($dropTrack) &middot; $($psKey.Count) drops simmed at target_error $TargetError &middot; client build $($loot.Build) &middot; $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+    Subtitle = "<b>$charName</b> &middot; $charClass $charSpec &middot; key <b>$klLabel</b> &rarr; drops at <b>ilvl $dropIlvl</b> ($dropTrack) &middot; $howMeasured &middot; client build $($loot.Build) &middot; $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
     Method   = $method
+    Metric   = $metricLabel
 }
 New-VoidcoreReport -Path $reportFile -Meta $meta -Rows $reportRows
 Write-Host "Report: $reportFile" -ForegroundColor Cyan

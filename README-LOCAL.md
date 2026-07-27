@@ -93,11 +93,39 @@ same pattern as `sim-gear.bat`. You can also drag a `.simc` file onto it.
 
 ```
 voidcore.bat                                (clipboard export, +10 key)
+voidcore.bat -Fast                          (instant: no sims, item level only)
 voidcore.bat -KeyLevel 6                    (rolls award ilvl 266 instead of 272)
 voidcore.bat my_characters\me.simc          (or drag the file onto voidcore.bat)
 voidcore.bat -Owned 251080,251085           (duplicate protection: already won these)
 voidcore.bat -Refresh                       (re-download the loot tables)
 ```
+
+### Instant mode: which dungeon is likeliest to drop a Myth item in a weak slot
+
+Double-click **`voidcore-fast.bat`** (clipboard export, same as the other
+launchers, or drag a `.simc` onto it). It is just `voidcore.bat` with `-Fast`,
+and takes the same switches:
+
+```
+voidcore-fast.bat                           (clipboard export, +10 key)
+voidcore-fast.bat -KeyLevel 6               (rolls award ilvl 266)
+voidcore-fast.bat my_characters\me.simc
+```
+
+`-Fast` skips simc entirely and answers in ~3 seconds: **how likely is one
+Voidcore to land in a slot where you currently have lower item level?** It
+compares the roll's ilvl against what you wear, pricing paired slots (rings,
+trinkets, weapons) against your *weakest* piece, since that is the one a drop
+replaces. It ranks by that probability and shows the average item-level jump
+next to it.
+
+The trade-off is that it is blind to stats and trinket procs, and the two modes
+genuinely disagree. On a geared Vengeance DH, `-Fast` picked Pit of Saron (71%
+chance of an ilvl upgrade) while the full sim picked Windrunner Spire — because
+Windrunner's Emberwing Feather is a *same-ilvl* trinket, so it scores zero on
+item level yet sims as the single biggest DPS gain available. Use `-Fast` to
+decide quickly, drop the switch when the answer is close or when weapons and
+trinkets are in play.
 
 The `.bat` just forwards to `voidcore-dungeons.ps1`, so every switch above works
 if you call the script directly too. Runs on both `pwsh` 7 and Windows

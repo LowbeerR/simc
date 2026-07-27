@@ -383,12 +383,17 @@ if ($InputFile) {
     Write-Host "Input: clipboard"
 }
 
-$classNames = 'death_knight','demon_hunter','druid','evoker','hunter','mage','monk','paladin','priest','rogue','shaman','warlock','warrior'
+# simc writes the two-word classes WITHOUT an underscore ("demonhunter=Name",
+# "deathknight=Name") in both the addon export and its own profiles, so accept
+# those spellings and normalise to the underscored keys the tables below use.
+$classNames = 'death_knight','demon_hunter','deathknight','demonhunter','druid','evoker','hunter','mage','monk','paladin','priest','rogue','shaman','warlock','warrior'
+$classAlias = @{ deathknight = 'death_knight'; demonhunter = 'demon_hunter' }
 $classRe = "^($($classNames -join '|'))=`"?([^`"]+)`"?\s*$"
 $charClass = $null; $charName = $null
 foreach ($l in ($text -split "`r?`n")) {
     if ($l -match $classRe) { $charClass = $Matches[1]; $charName = $Matches[2]; break }
 }
+if ($charClass -and $classAlias[$charClass]) { $charClass = $classAlias[$charClass] }
 if (-not $charClass) { throw "Input does not look like a SimC addon export (no 'class=`"Name`"' line found). Copy the /simc text in-game first." }
 $charSpec = if ($text -match '(?m)^spec=(\w+)\s*$') { $Matches[1] } else { '?' }
 Write-Host "Character: $charName ($charClass, $charSpec)"
