@@ -1551,6 +1551,8 @@ sim_t::sim_t()
     count_overheal_as_heal( false ),
     scaling_normalized( 1.0 ),
     merge_enemy_priority_dmg( false ),
+    profileset_controller_factory(
+        { { "set_bonus_enabled", profileset_controller::create_fn_pair<set_bonus_enabled_t>() } } ),
     profileset_controller(),
     profileset_controller_data(),
     // Multi-Threading
@@ -1579,7 +1581,8 @@ sim_t::sim_t()
     profileset_enabled( false ),
     profileset_work_threads( 0 ),
     profileset_init_threads( 1 ),
-    profilesets( std::make_unique<profileset::profilesets_t>() )
+    profilesets( std::make_unique<profileset::profilesets_t>() ),
+    profileset_name()
 {
   item_db_sources.assign( std::begin( default_item_db_sources ), std::end( default_item_db_sources ) );
 
@@ -1592,9 +1595,12 @@ sim_t::sim_t()
   profileset::create_options( this );
 }
 
-sim_t::sim_t( sim_t* p, int index ) : sim_t()
+sim_t::sim_t( sim_t* p, int index, std::string_view profileset_name )
+  : sim_t()
 {
   assert( p );
+
+  this->profileset_name = profileset_name;
 
   parent = p;
   thread_index = index;
@@ -1619,9 +1625,12 @@ sim_t::sim_t( sim_t* p, int index ) : sim_t()
   parent -> add_relative( this );
 }
 
-sim_t::sim_t( sim_t* p, int index, sim_control_t* control ) : sim_t()
+sim_t::sim_t( sim_t* p, int index, sim_control_t* control, std::string_view profileset_name )
+  : sim_t()
 {
   assert( p && control );
+
+  this->profileset_name = profileset_name;
 
   parent = p;
   thread_index = index;
@@ -1940,7 +1949,8 @@ void sim_t::combat_begin()
     make_event<bloodlust_check_t>( *this, *this, timespan_t::from_seconds( 0.0 ) );
   }
 
-  if ( fixed_time || ( target -> resources.base[ RESOURCE_HEALTH ] == 0 ) )
+  // Keep droute from creating an end event, it will end itself after the last pull ends
+  if ( ( fixed_time || target -> resources.base[ RESOURCE_HEALTH ] == 0 ) && fight_style != FIGHT_STYLE_DUNGEON_ROUTE )
   {
     make_event<sim_end_event_t>( *this, *this, expected_iteration_time );
     target -> death_pct = enemy_death_pct;
@@ -2351,6 +2361,10 @@ void sim_t::init_fight_style()
       fixed_time = false;
       // Bloodlust is handled by an option on each pull raid event.
       overrides.bloodlust = 0;
+      // Only use for this should be setting the safeguard event (max_time * 2). As long as Blizzard remains sane and tunes around a typical dungeon
+      // taking about 30 minutes to complete, a safeguard of 1.5 hours should be a safe point to assume something has gone wrong in the sim, either the 
+      // input needs to be checked or something got stuck.
+      max_time = 45_min;
       break;
 
     case FIGHT_STYLE_CLEAVE_ADD:
@@ -2892,7 +2906,7 @@ void sim_t::init()
   {
     for ( const auto& [ key, values ] : profileset_controller_options )
     {
-      if ( profileset_controller_t::controller_exists( key ) )
+      if ( profileset_controller_t::controller_exists( this, key ) )
         for ( const auto& value : values )
           profileset_controller_data.emplace_back( key, value );
       else
@@ -3387,7 +3401,7 @@ void sim_t::partition()
 
   for ( int i = 0; i < num_children; i++ )
   {
-    auto  child = new sim_t( this, i + 1, child_control );
+    auto  child = new sim_t( this, i + 1, child_control, child_control->combat.name );
 
     assert( child );
     children.push_back( child );

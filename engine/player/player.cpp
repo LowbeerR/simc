@@ -7158,7 +7158,7 @@ void player_t::demise()
   if ( is_enemy() )
   {
     sim->active_enemies--;
-    sim->target_non_sleeping_list.find_and_erase_unordered( this );
+    sim->target_non_sleeping_list.find_and_erase( this );
 
     // When an enemy dies, trigger players to acquire a new target
     range::for_each( sim->player_non_sleeping_list,
@@ -12323,14 +12323,15 @@ std::unique_ptr<expr_t> player_t::create_expression( util::string_view expressio
   if ( splits.size() == 2 && splits[ 0 ] == "potion" )
   {
     std::string_view potion_view;
+    std::string default_potion = this->default_potion();
 
     if ( !potion_str.empty() )
     {
       potion_view = potion_str;
     }
-    else if ( default_potion().empty() )
+    else if ( !default_potion.empty() )
     {
-      potion_view = default_potion();
+      potion_view = default_potion;
     }
     else
     {
